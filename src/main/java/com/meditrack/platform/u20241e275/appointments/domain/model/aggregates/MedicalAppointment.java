@@ -2,18 +2,17 @@ package com.meditrack.platform.u20241e275.appointments.domain.model.aggregates;
 
 import com.meditrack.platform.u20241e275.appointments.domain.model.valueobjects.AppointmentSchedule;
 import com.meditrack.platform.u20241e275.appointments.domain.model.valueobjects.AppointmentStatus;
+import com.meditrack.platform.u20241e275.shared.domain.model.aggregates.AbstractDomainAggregateRoot;
 import com.meditrack.platform.u20241e275.shared.domain.model.valueobjects.AppointmentCode;
 import com.meditrack.platform.u20241e275.shared.domain.model.valueobjects.DoctorId;
 import com.meditrack.platform.u20241e275.shared.domain.model.valueobjects.Money;
 import com.meditrack.platform.u20241e275.shared.domain.model.valueobjects.PatientId;
 import lombok.Getter;
-import org.springframework.data.domain.AbstractAggregateRoot;
 
-import java.math.BigDecimal;
 import java.time.Instant;
 
 @Getter
-public class MedicalAppointment extends AbstractAggregateRoot<MedicalAppointment> {
+public class MedicalAppointment extends AbstractDomainAggregateRoot<MedicalAppointment> {
 
     private Long id;
     private AppointmentCode appointmentCode;
