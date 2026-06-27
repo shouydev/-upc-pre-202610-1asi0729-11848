@@ -270,3 +270,272 @@ public record Money(BigDecimal value, String currency) {
         return other != null && this.currency.equals(other.currency) && this.value.compareTo(other.value) < 0;
     }
 }
+--------------------------------------------------------------------------------------
+this.status = Objects.requireNonNullElse(status, InvoiceStatus.DRAFT);
+
+public sealed interface InvoiceCommandFailure permits
+        InvoiceCommandFailure.NotFound,
+        InvoiceCommandFailure.InvalidState,
+        InvoiceCommandFailure.Duplicate {
+    record NotFound(String message) implements InvoiceCommandFailure {}
+
+    record InvalidState(String message) implements InvoiceCommandFailure {}
+
+    record Duplicate(String message) implements InvoiceCommandFailure {}
+}
+
+@Service
+public class InvoiceCommandServiceImpl implements InvoiceCommandService {
+
+    private final InvoiceRepository invoiceRepository;
+
+    public InvoiceCommandServiceImpl(InvoiceRepository invoiceRepository) {
+        this.invoiceRepository = invoiceRepository;
+    }
+
+    @Override
+    @Transactional
+    public Result<Invoice, InvoiceCommandFailure> handle(CreateInvoiceCommand command) {
+        try {
+            if (invoiceRepository.existsByInvoiceIdentifier(command.chargebeeIdentifier())) {
+                throw new IllegalStateException("billing.error.invoice.alreadyExists");
+            }
+
+            Invoice invoice = new Invoice(
+                    command.chargebeeIdentifier(),
+                    command.customerId(),
+                    command.billingPeriod(),
+                    command.totalAmount(),
+                    command.status(),
+                    command.memo()
+            );
+
+            Invoice savedInvoice = invoiceRepository.save(invoice);
+            return Result.success(savedInvoice);
+
+        } catch (IllegalArgumentException e) {
+            return Result.failure(new InvoiceCommandFailure.NotFound(e.getMessage()));
+        } catch (IllegalStateException e) {
+            return Result.failure(new InvoiceCommandFailure.InvalidState(e.getMessage()));
+        }
+    }
+}
+
+@Service
+public class InvoiceQueryServiceImpl implements InvoiceQueryService {
+
+    private final InvoiceRepository invoiceRepository;
+
+    public InvoiceQueryServiceImpl(InvoiceRepository invoiceRepository) {
+        this.invoiceRepository = invoiceRepository;
+    }
+
+    @Override
+    public Optional<Invoice> handle(GetInvoiceByIdQuery query) {
+      if(query.id() == null){
+          throw new IllegalArgumentException("Invoice ID cannot be null");
+      }
+      return invoiceRepository.findById(query.id());
+    }
+}
+
+@Getter
+@Setter
+@NoArgsConstructor
+@Entity
+@EntityListeners(AuditingEntityListener.class)
+@Table(name = "invoices")
+@SQLDelete(sql = "UPDATE invoices SET deleted_at = CURRENT_TIMESTAMP WHERE id = ?")
+@SQLRestriction("deleted_at IS NULL")
+public class InvoicePersistenceEntity extends AuditableAbstractPersistenceEntity implements Persistable<Long> {
+
+    @Override
+    public boolean isNew() {
+        return getCreatedAt() == null;
+    }
+
+    @Embedded
+    @AttributeOverride(name = "value", column = @Column(name = "invoice_identifier", nullable = false, unique = true, columnDefinition = "CHAR(36)"))
+    private ChargebeeIdentifier invoiceIdentifier;
+
+    @Embedded
+    @AttributeOverride(name = "value", column = @Column(name = "customer_id", nullable = false, columnDefinition = "CHAR(36)"))
+    private CustomerId customerId;
+
+    @Embedded
+    @AttributeOverrides({
+            @AttributeOverride(name = "invoiceStartDate", column = @Column(name = "invoice_start_date", nullable = false)),
+            @AttributeOverride(name = "invoiceEndDate", column = @Column(name = "invoice_end_date", nullable = false))
+    })
+    private BillingPeriod billingPeriod;
+
+
+    @Embedded
+    @AttributeOverrides({
+            @AttributeOverride(name = "value", column = @Column(name = "total_amount_value", nullable = false)),
+            @AttributeOverride(name = "currency", column = @Column(name = "total_amount_currency", nullable = false, columnDefinition = "CHAR(3)"))
+    })
+    private MonetaryAmount totalAmount;
+
+    @Enumerated(EnumType.STRING)
+    @Column(nullable = false)
+    private InvoiceStatus status;
+
+    @Column(nullable = true)
+    private String memo;
+
+    @Column(name = "deleted_at")
+    private Instant deletedAt;
+}
+
+public final class InvoicePersistenceAssembler {
+
+    public InvoicePersistenceAssembler() {}
+
+    public static InvoicePersistenceEntity toPersistenceEntity(Invoice invoice) {
+        if (invoice == null) return null;
+        InvoicePersistenceEntity persistenceEntity = new InvoicePersistenceEntity();
+        if (invoice.getId() != null) {
+            persistenceEntity.setId(invoice.getId());
+        }
+        persistenceEntity.setInvoiceIdentifier(invoice.getInvoiceIdentifier());
+        persistenceEntity.setCustomerId(invoice.getCustomerId());
+        persistenceEntity.setBillingPeriod(invoice.getBillingPeriod());
+        persistenceEntity.setTotalAmount(invoice.getTotalAmount());
+        persistenceEntity.setStatus(invoice.getStatus());
+        persistenceEntity.setMemo(invoice.getMemo());
+        persistenceEntity.setCreatedAt(invoice.getCreatedAt());
+        persistenceEntity.setUpdatedAt(invoice.getUpdatedAt());
+        persistenceEntity.setDeletedAt(invoice.getDeletedAt());
+        return persistenceEntity;
+    }
+
+    public static Invoice toDomainEntity(InvoicePersistenceEntity persistenceEntity){
+        if (persistenceEntity == null) return null;
+        return new Invoice(
+                persistenceEntity.getId(),
+                persistenceEntity.getInvoiceIdentifier(),
+                persistenceEntity.getCustomerId(),
+                persistenceEntity.getBillingPeriod(),
+                persistenceEntity.getTotalAmount(),
+                persistenceEntity.getStatus(),
+                persistenceEntity.getMemo(),
+                persistenceEntity.getCreatedAt(),
+                persistenceEntity.getUpdatedAt(),
+                persistenceEntity.getDeletedAt()
+        );
+    }
+}
+
+@Repository
+public class InvoiceRepositoryImpl implements InvoiceRepository {
+
+    private final InvoicePersistenceRepository invoicePersistenceRepository;
+
+    public InvoiceRepositoryImpl(InvoicePersistenceRepository invoicePersistenceRepository) {
+        this.invoicePersistenceRepository = invoicePersistenceRepository;
+    }
+
+    @Override
+    public Invoice save(Invoice invoice) {
+        InvoicePersistenceEntity entity = InvoicePersistenceAssembler.toPersistenceEntity(invoice);
+        InvoicePersistenceEntity savedEntity = invoicePersistenceRepository.save(entity);
+
+        return InvoicePersistenceAssembler.toDomainEntity(savedEntity);
+    }
+
+    @Override
+    public Optional<Invoice> findById(Long id) {
+        return invoicePersistenceRepository.findById(id)
+                .map(InvoicePersistenceAssembler::toDomainEntity);
+    }
+
+    @Override
+    public boolean existsByInvoiceIdentifier(ChargebeeIdentifier invoiceIdentifier) {
+        return invoicePersistenceRepository.existsByInvoiceIdentifier(invoiceIdentifier);
+    }
+}
+
+public final class InvoiceCommandFromResourceAssembler {
+
+    public InvoiceCommandFromResourceAssembler() {}
+
+    public static CreateInvoiceCommand toCommandFromResource(CreateInvoiceCommandResource resource) {
+        return new CreateInvoiceCommand(
+                new ChargebeeIdentifier(UUID.fromString(resource.invoiceId())),
+                new CustomerId(UUID.fromString(resource.customerId())),
+                new BillingPeriod(LocalDate.parse(resource.billingStartDate()), LocalDate.parse(resource.billingEndDate())),
+                new MonetaryAmount(resource.monetaryAmountValue(), resource.monetaryAmountCurrency()),
+                InvoiceStatus.valueOf(resource.status()),
+                resource.memo()
+        );
+    }
+}
+
+public final class InvoiceResourceFromAggregateAssembler {
+
+    private InvoiceResourceFromAggregateAssembler() {}
+
+    public static InvoiceResource toResourceFromAggregate(Invoice invoice) {
+        return new InvoiceResource(
+                invoice.getId(),
+                invoice.getInvoiceIdentifier().value().toString(),
+                invoice.getCustomerId().value().toString(),
+                invoice.getBillingPeriod().startDate().toString(),
+                invoice.getBillingPeriod().endDate().toString(),
+                invoice.getTotalAmount().value(),
+                invoice.getTotalAmount().currency()
+        );
+    }
+}
+
+public final class ResponseEntityFromInvoiceCommandResultAssembler {
+
+    private ResponseEntityFromInvoiceCommandResultAssembler() {}
+
+    public static ResponseEntity<?> toResponseEntityFromResult(
+            Result<Invoice, InvoiceCommandFailure> result,
+            MessageSource messageSource) {
+        return toResponseEntityFromResult(result, messageSource, HttpStatus.OK);
+    }
+
+    public static ResponseEntity<?> toResponseEntityFromResult(
+            Result<Invoice, InvoiceCommandFailure> result,
+            MessageSource messageSource,
+            HttpStatus successStatus) {
+        return result.fold(
+                success -> new ResponseEntity<>(
+                        InvoiceResourceFromAggregateAssembler.toResourceFromAggregate(success),
+                        successStatus
+                ),
+                failure -> {
+                    HttpStatus status = statusFromFailure(failure);
+                    String localizedMessage = messageFromFailure(failure, messageSource);
+                    return ResponseEntity.status(status).body(
+                            ProblemDetail.forStatusAndDetail(status, localizedMessage)
+                    );
+                }
+        );
+    }
+
+    private static HttpStatus statusFromFailure(InvoiceCommandFailure failure) {
+        return switch (failure) {
+            case InvoiceCommandFailure.Duplicate(String _) -> HttpStatus.CONFLICT;
+            case InvoiceCommandFailure.NotFound(String _) -> HttpStatus.NOT_FOUND;
+            case InvoiceCommandFailure.InvalidState(String _) -> HttpStatus.BAD_REQUEST;
+        };
+    }
+
+    private static String messageFromFailure(InvoiceCommandFailure failure, MessageSource messageSource) {
+        String messageKey = switch (failure) {
+            case InvoiceCommandFailure.Duplicate(String message) -> message;
+            case InvoiceCommandFailure.NotFound(String message) -> message;
+            case InvoiceCommandFailure.InvalidState(String message) -> message;
+        };
+        try {
+            return messageSource.getMessage(messageKey, null, Locale.getDefault());
+        } catch (Exception e) {
+            return messageKey;
+        }
+    }
+}
